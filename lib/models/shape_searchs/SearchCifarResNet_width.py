@@ -156,6 +156,7 @@ class ResNetBasicblock(nn.Module):
     else:
       residual, expected_flop_c = inputs, 0
     out = additive_func(residual, out_b)
+    out = nn.functional.relu(out, inplace=True)
     return out, expected_inC_b, sum([expected_flop_a, expected_flop_b, expected_flop_c])
 
   def basic_forward(self, inputs):
