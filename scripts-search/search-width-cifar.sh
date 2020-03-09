@@ -27,7 +27,7 @@ rseed=$7
 
 
 SAVE_ROOT="$TORCH_HOME/output"
-BRANCH='nas'
+BRANCH='nas-l2'
 save_dir=${SAVE_ROOT}/search-width-$BRANCH/${dataset}-${model}-${optim}-Gumbel_${gumbel_min}_${gumbel_max}-${expected_FLOP_ratio}
 
 python --version
