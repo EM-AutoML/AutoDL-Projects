@@ -26,7 +26,7 @@ expected_FLOP_ratio=$6
 rseed=$7
 
 
-SAVE_ROOT="./output"
+SAVE_ROOT="$TORCH_HOME/output"
 
 save_dir=${SAVE_ROOT}/search-width/${dataset}-${model}-${optim}-Gumbel_${gumbel_min}_${gumbel_max}-${expected_FLOP_ratio}
 
@@ -35,7 +35,7 @@ python --version
 OMP_NUM_THREADS=4 python ./exps/search-shape.py --dataset ${dataset} \
 	--data_path $TORCH_HOME/cifar.python \
 	--model_config ./configs/archs/CIFAR-${model}.config \
-	--split_path   ./.latent-data/splits/${dataset}-0.5.pth \
+	--split_path   $TORCH_HOME/.latent-data/splits/${dataset}-0.5.pth \
 	--optim_config ./configs/search-opts/${optim}.config \
 	--search_shape   width \
 	--procedure      search \
@@ -68,7 +68,7 @@ else
 	--data_path $TORCH_HOME/cifar.python \
 	--model_config  ${save_dir}/seed-${rseed}-last.config \
 	--optim_config  ./configs/opts/CIFAR-E300-W5-L1-COS.config \
-	--KD_checkpoint ./.latent-data/basemodels/${dataset}/${model}.pth \
+	--KD_checkpoint $TORCH_HOME/.latent-data/basemodels/${dataset}/${model}.pth \
 	--procedure    Simple-KD \
 	--save_dir     ${xsave_dir} \
 	--KD_alpha 0.9 --KD_temperature 4 \
