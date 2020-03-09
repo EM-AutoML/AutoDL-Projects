@@ -9,13 +9,13 @@ if [ "$#" -ne 7 ] ;then
   echo "Need 7 parameters for the dataset and the-model-name and the-optimizer and gumbel-max/min and FLOP-ratio and the-random-seed"
   exit 1
 fi
-if [ "$TORCH_HOME" = "" ]; then
-  echo "Must set TORCH_HOME envoriment variable for data dir saving"
-  exit 1
-else
-  echo "TORCH_HOME : $TORCH_HOME"
-fi
-
+# if [ "$TORCH_HOME" = "" ]; then
+#   echo "Must set TORCH_HOME envoriment variable for data dir saving"
+#   exit 1
+# else
+#   echo "TORCH_HOME : $TORCH_HOME"
+# fi
+TORCH_HOME='/home/nfs/em5/automl/TORCH_HOME'
 dataset=$1
 model=$2
 optim=$3
@@ -27,8 +27,8 @@ rseed=$7
 
 
 SAVE_ROOT="$TORCH_HOME/output"
-
-save_dir=${SAVE_ROOT}/search-width/${dataset}-${model}-${optim}-Gumbel_${gumbel_min}_${gumbel_max}-${expected_FLOP_ratio}
+BRANCH='nas'
+save_dir=${SAVE_ROOT}/search-width-$BRANCH/${dataset}-${model}-${optim}-Gumbel_${gumbel_min}_${gumbel_max}-${expected_FLOP_ratio}
 
 python --version
 
@@ -55,7 +55,7 @@ else
   xsave_dir=${save_dir}/seed-${rseed}-NMT
   OMP_NUM_THREADS=4 python ./exps/basic-main.py --dataset ${dataset} \
 	--data_path $TORCH_HOME/cifar.python \
-	--model_config ${save_dir}/seed-${rseed}-last.config \
+	--model_config ${save_dir}/seed-${rseed}-best.config \
 	--optim_config ./configs/opts/CIFAR-E300-W5-L1-COS.config \
 	--procedure    basic \
 	--save_dir     ${xsave_dir} \
@@ -66,7 +66,7 @@ else
   xsave_dir=${save_dir}/seed-${rseed}-KDT
   OMP_NUM_THREADS=4 python ./exps/KD-main.py --dataset ${dataset} \
 	--data_path $TORCH_HOME/cifar.python \
-	--model_config  ${save_dir}/seed-${rseed}-last.config \
+	--model_config  ${save_dir}/seed-${rseed}-best.config \
 	--optim_config  ./configs/opts/CIFAR-E300-W5-L1-COS.config \
 	--KD_checkpoint $TORCH_HOME/.latent-data/basemodels/${dataset}/${model}.pth \
 	--procedure    Simple-KD \

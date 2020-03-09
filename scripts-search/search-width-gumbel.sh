@@ -8,12 +8,7 @@ if [ "$#" -ne 5 ] ;then
   echo "Need 5 parameters for the dataset and the-model-name and the-optimizer and FLOP-ratio and the-random-seed"
   exit 1
 fi
-if [ "$TORCH_HOME" = "" ]; then
-  echo "Must set TORCH_HOME envoriment variable for data dir saving"
-  exit 1
-else
-  echo "TORCH_HOME : $TORCH_HOME"
-fi
+
 
 dataset=$1
 model=$2
