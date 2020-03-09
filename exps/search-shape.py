@@ -8,6 +8,8 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 import numpy as np
 from copy    import deepcopy
 from pathlib import Path
+import os
+
 
 lib_dir = (Path(__file__).parent / '..' / 'lib').resolve()
 print ('lib_dir : {:}'.format(lib_dir))
@@ -55,7 +57,16 @@ def main(args):
 
   # obtain the model
   search_model = obtain_search_model(model_config)
+
+  
+  channels_ori, channels_after_prune = search_model.get_arch_info()
+  logger.log('_'.join(str(int(b))+'/'+str(int(a)) for a,b in zip(channels_ori,channels_after_prune)))
+
+
   MAX_FLOP, param  = get_model_infos(search_model, xshape)
+  # MAX_FLOP, param  = 253.149834, 1.7657  #resnet 110
+  # MAX_FLOP, param  = 40.813194, 0.27908   #resnet 20
+  MAX_FLOP, param  = 69.124746,0.477296    #resnet 32
   optim_config = load_config(args.optim_config, {'class_num': class_num, 'FLOP': MAX_FLOP}, logger)
   logger.log('Model Information : {:}'.format(search_model.get_message()))
   logger.log('MAX_FLOP = {:} M'.format(MAX_FLOP))
@@ -65,7 +76,17 @@ def main(args):
   logger.log('search_train_loader : {:} samples'.format( len(train_split) ))
   logger.log('search_valid_loader : {:} samples'.format( len(valid_split) ))
   base_optimizer, scheduler, criterion = get_optim_scheduler(search_model.base_parameters(), optim_config)
-  arch_optimizer = torch.optim.Adam(search_model.arch_parameters(), lr=optim_config.arch_LR, betas=(0.5, 0.999), weight_decay=optim_config.arch_decay)
+
+  arch_parameters = []
+  for k, para in search_model.named_parameters():
+    if k.endswith('layer_channel_attentions'): 
+      arch_parameters.append(para)
+      print(k)
+
+
+
+
+  arch_optimizer = torch.optim.Adam(arch_parameters, lr=optim_config.arch_LR, betas=(0.5, 0.999), weight_decay=optim_config.arch_decay)
   logger.log('base-optimizer : {:}'.format(base_optimizer))
   logger.log('arch-optimizer : {:}'.format(arch_optimizer))
   logger.log('scheduler      : {:}'.format(scheduler))
@@ -127,10 +148,15 @@ def main(args):
     arch_genotypes[epoch]  = genotype
     arch_genotypes['last'] = genotype
     logger.log('[{:}] genotype : {:}'.format(epoch_str, genotype))
-    arch_info, discrepancy = search_model.get_arch_info()
-    logger.log(arch_info)
-    discrepancies[epoch]   = discrepancy
-    logger.log('[{:}] FLOP : {:.2f} MB, ratio : {:.4f}, Expected-ratio : {:.4f}, Discrepancy : {:.3f}'.format(epoch_str, cur_FLOP, cur_FLOP/MAX_FLOP, args.FLOP_ratio, np.mean(discrepancy)))
+
+    # arch_info, discrepancy = search_model.get_arch_info()
+    # logger.log(arch_info)
+    # discrepancies[epoch]   = discrepancy
+    # logger.log('[{:}] FLOP : {:.2f} MB, ratio : {:.4f}, Expected-ratio : {:.4f}, Discrepancy : {:.3f}'.format(epoch_str, cur_FLOP, cur_FLOP/MAX_FLOP, args.FLOP_ratio, np.mean(discrepancy)))
+    logger.log('[{:}] FLOP : {:.2f} MB, ratio : {:.4f}, Expected-ratio : {:.4f}'.format(epoch_str, cur_FLOP, cur_FLOP/MAX_FLOP, args.FLOP_ratio))
+
+    channels_ori, channels_after_prune = search_model.get_arch_info()
+    logger.log('_'.join(str(int(b))+'/'+str(int(a)) for a,b in zip(channels_ori,channels_after_prune)))
 
     #if cur_FLOP/MAX_FLOP > args.FLOP_ratio:
     #  init_flop_weight = init_flop_weight * args.FLOP_decay
@@ -138,7 +164,8 @@ def main(args):
     #  init_flop_weight = init_flop_weight / args.FLOP_decay
     
     # evaluate the performance
-    if (epoch % args.eval_frequency == 0) or (epoch + 1 == total_epoch):
+    # if (epoch % args.eval_frequency == 0) or (epoch + 1 == total_epoch):
+    if True:
       logger.log('-'*150)
       valid_loss, valid_acc1, valid_acc5 = valid_func(search_valid_loader, network, criterion, epoch_str, args.print_freq_eval, logger)
       valid_accuracies[epoch] = valid_acc1
@@ -199,4 +226,45 @@ def main(args):
 
 if __name__ == '__main__':
   args = obtain_args()
+  # os.environ["CUDA_VISIBLE_DEVICES"] = "7"
+  # print('-------------------------')
+
+  # dataset='cifar100'
+  # model='ResNet32'
+  # optim='CIFARX'
+  # expected_FLOP_ratio=0.57
+  # rseed=399
+  # batch=256
+  # gumbel_min=0.1
+  # gumbel_max=5
+  
+  # TORCH_HOME='/home/nfs/em5/automl/TORCH_HOME/'
+  # SAVE_ROOT=TORCH_HOME+"output"
+  # save_dir=SAVE_ROOT+'/search-width/'+dataset+'-'+model+'-'+optim+'-'+'Gumbel_'+str(gumbel_min)+'_'+str(gumbel_max)+'-'+str(expected_FLOP_ratio)
+
+  # args.dataset         = dataset
+  # args.data_path       = TORCH_HOME+'cifar.python'
+  # args.model_config    = './configs/archs/CIFAR-'+model+'.config'
+  # args.split_path      = TORCH_HOME+'.latent-data/splits/'+dataset+'-0.5.pth'
+  # args.optim_config    = './configs/search-opts/'+optim+'.config'
+  # args.search_shape    = 'width'
+  # args.procedure       = 'search'
+  # args.FLOP_ratio      = expected_FLOP_ratio
+  # args.FLOP_weight     = 2
+  # args.FLOP_tolerant   = 0.05
+  # args.save_dir        = save_dir
+  # args.gumbel_tau_max  = gumbel_max
+  # args.gumbel_tau_min  = gumbel_min
+  # args.cutout_length   = -1
+  # args.batch_size      = batch
+  # args.rand_seed       = rseed
+  # args.workers         = 4
+  # args.eval_frequency  = 1
+  # args.print_freq      = 100
+  # args.print_freq_eval = 200
+
+  
+  # for k, v in args.__dict__.items():
+  #   print(str(k)+': '+str(v))
+
   main(args)

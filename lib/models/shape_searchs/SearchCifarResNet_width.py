@@ -8,7 +8,23 @@ from ..SharedUtils    import additive_func
 from .SoftSelect      import select2withP, ChannelWiseInter
 from .SoftSelect      import linear_forward
 from .SoftSelect      import get_width_choices as get_choices
+from torch.nn.modules.utils import _pair as pair
+import torch.nn.functional as F
+from torch.nn import init
 
+
+def get_gumbel_prob(xins, tau):
+    while True:
+        gumbels = -torch.empty_like(xins).exponential_().log()
+        logits  = (xins.log_softmax(dim=1) + gumbels) / tau
+        probs   = F.softmax(logits, dim=1)
+        index   = probs.max(-1, keepdim=True)[1]
+        one_h   = torch.zeros_like(logits).scatter_(-1, index, 1.0)
+        hardwts = one_h - probs.detach() + probs
+        if (torch.isinf(gumbels).any()) or (torch.isinf(probs).any()) or (torch.isnan(probs).any()):
+            continue
+        else: break
+    return hardwts, index
 
 def conv_forward(inputs, conv, choices):
   iC = conv.in_channels
@@ -23,42 +39,49 @@ def conv_forward(inputs, conv, choices):
 
 class ConvBNReLU(nn.Module):
   num_conv  = 1
-  def __init__(self, nIn, nOut, kernel, stride, padding, bias, has_avg, has_bn, has_relu):
+  def __init__(self, nIn, nOut, kernel, stride, padding, bias, has_avg, has_bn, has_relu, min_channel_ratio = 0.2, groups = 1):
     super(ConvBNReLU, self).__init__()
     self.InShape  = None
     self.OutShape = None
-    self.choices  = get_choices(nOut)
-    self.register_buffer('choices_tensor', torch.Tensor( self.choices ))
-
+    self.kernel_size = pair(kernel)
+    self.min_channel = int(nOut*min_channel_ratio)
+    self.weights = nn.Parameter(torch.Tensor(nOut, nIn // groups, *self.kernel_size))
+    self.register_parameter('layer_channel_attentions', nn.Parameter(1e-3*torch.randn(nOut-self.min_channel, 2)))
     if has_avg : self.avg = nn.AvgPool2d(kernel_size=2, stride=2, padding=0)
     else       : self.avg = None
-    self.conv = nn.Conv2d(nIn, nOut, kernel_size=kernel, stride=stride, padding=padding, dilation=1, groups=1, bias=bias)
-    #if has_bn  : self.bn  = nn.BatchNorm2d(nOut)
-    #else       : self.bn  = None
     self.has_bn = has_bn
-    self.BNs  = nn.ModuleList()
-    for i, _out in enumerate(self.choices):
-      self.BNs.append(nn.BatchNorm2d(_out))
+    self.BN = nn.BatchNorm2d(nOut)
+    # self.BN = nn.LayerNorm([nOut,100,100])
     if has_relu: self.relu = nn.ReLU(inplace=True)
     else       : self.relu = None
     self.in_dim   = nIn
     self.out_dim  = nOut
     self.search_mode = 'basic'
+    self.stride = stride
+    self.padding = padding
+    self.dilation = 1
+    self.groups = groups
+    self.nOut = nOut
+    self.nIn = nIn
+    self.bias = False
 
+    init.kaiming_normal(self.weights, mode='fan_in')
+
+
+   
   def get_flops(self, channels, check_range=True, divide=1):
     iC, oC = channels
-    if check_range: assert iC <= self.conv.in_channels and oC <= self.conv.out_channels, '{:} vs {:}  |  {:} vs {:}'.format(iC, self.conv.in_channels, oC, self.conv.out_channels)
+    if check_range: assert iC <= self.nIn and oC <= self.nOut, '{:} vs {:}  |  {:} vs {:}'.format(iC, self.nIn, oC, self.nOut)
     assert isinstance(self.InShape, tuple) and len(self.InShape) == 2, 'invalid in-shape : {:}'.format(self.InShape)
     assert isinstance(self.OutShape, tuple) and len(self.OutShape) == 2, 'invalid out-shape : {:}'.format(self.OutShape)
-    #conv_per_position_flops = self.conv.kernel_size[0] * self.conv.kernel_size[1] * iC * oC / self.conv.groups
-    conv_per_position_flops = (self.conv.kernel_size[0] * self.conv.kernel_size[1] * 1.0 / self.conv.groups)
+    conv_per_position_flops = (self.kernel_size[0] * self.kernel_size[1] * 1.0 / self.groups)
     all_positions = self.OutShape[0] * self.OutShape[1]
     flops = (conv_per_position_flops * all_positions / divide) * iC * oC
-    if self.conv.bias is not None: flops += all_positions / divide
+    if self.bias is not None: flops += all_positions / divide
     return flops
 
   def get_range(self):
-    return [self.choices]
+    return [(self.min_channel, self.nOut)]
 
   def forward(self, inputs):
     if self.search_mode == 'basic':
@@ -69,27 +92,27 @@ class ConvBNReLU(nn.Module):
       raise ValueError('invalid search_mode = {:}'.format(self.search_mode))
 
   def search_forward(self, tuple_inputs):
-    assert isinstance(tuple_inputs, tuple) and len(tuple_inputs) == 5, 'invalid type input : {:}'.format( type(tuple_inputs) )
-    inputs, expected_inC, probability, index, prob = tuple_inputs
-    index, prob = torch.squeeze(index).tolist(), torch.squeeze(prob)
-    probability = torch.squeeze(probability)
-    assert len(index) == 2, 'invalid length : {:}'.format(index)
+    assert isinstance(tuple_inputs, tuple) and len(tuple_inputs) == 3, 'invalid type input : {:}'.format( type(tuple_inputs) )
+    inputs, expected_inC, tau = tuple_inputs
+
+    #
+    # import pdb;pdb.set_trace()
+    # probs   = F.softmax(self.layer_channel_attentions, dim=1)
+    # index   = probs.max(-1, keepdim=True)[1]
+    # one_h   = torch.zeros_like(self.layer_channel_attentions).scatter_(-1, index, 1.0)
+
+    self.gum_soft_C, _ = get_gumbel_prob(self.layer_channel_attentions, tau)
     # compute expected flop
-    #coordinates   = torch.arange(self.x_range[0], self.x_range[1]+1).type_as(probability)
-    expected_outC = (self.choices_tensor * probability).sum()
+    expected_outC = (self.min_channel + (F.softmax(self.layer_channel_attentions, dim=1)[:,1]).sum())
     expected_flop = self.get_flops([expected_inC, expected_outC], False, 1e6)
     if self.avg : out = self.avg( inputs )
     else        : out = inputs
-    # convolutional layer
-    out_convs = conv_forward(out, self.conv, [self.choices[i] for i in index])
-    out_bns   = [self.BNs[idx](out_conv) for idx, out_conv in zip(index, out_convs)]
-    # merge
-    out_channel = max([x.size(1) for x in out_bns])
-    outA = ChannelWiseInter(out_bns[0], out_channel)
-    outB = ChannelWiseInter(out_bns[1], out_channel)
-    out  = outA * prob[0] + outB * prob[1]
-    #out = additive_func(out_bns[0]*prob[0], out_bns[1]*prob[1])
 
+    # convolutional layer
+    weights = self.weights
+    output = F.conv2d(out, weights, None, self.stride, self.padding, self.dilation, self.groups)
+    out = self.BN(output)
+    out =  torch.cat([torch.ones([self.min_channel,1]).cuda(), self.gum_soft_C[:,1].view(-1,1)], dim=0).view(1,self.nOut,  1, 1)*out
     if self.relu: out = self.relu( out )
     else        : out = out
     return out, expected_outC, expected_flop
@@ -97,14 +120,30 @@ class ConvBNReLU(nn.Module):
   def basic_forward(self, inputs):
     if self.avg : out = self.avg( inputs )
     else        : out = inputs
-    conv = self.conv( out )
-    if self.has_bn:out= self.BNs[-1]( conv )
-    else        : out = conv
-    if self.relu: out = self.relu( out )
-    else        : out = out
+    # conv = self.conv( out )
+    probs   = F.softmax(self.layer_channel_attentions, dim=1)
+    index   = probs.max(-1, keepdim=True)[1]
+    one_h   = torch.zeros_like(self.layer_channel_attentions).scatter_(-1, index, 1.0)
+    
+    weights = self.weights
+    conv = F.conv2d(out, weights, None, self.stride, self.padding, self.dilation, self.groups)
+
+
     if self.InShape is None:
       self.InShape  = (inputs.size(-2), inputs.size(-1))
-      self.OutShape = (out.size(-2)   , out.size(-1))
+      self.OutShape = (conv.size(-2)   , conv.size(-1))
+      # self.BN = nn.LayerNorm(tuple([self.nOut,self.OutShape[0],self.OutShape[1]]))
+
+    if self.has_bn: out= self.BN(conv)
+    else          : out = conv
+    out = torch.cat([torch.ones([self.min_channel,1]).to(one_h.device), one_h[:,1].view(-1,1)], dim=0).view(1, self.nOut, 1, 1) * out
+
+    if self.relu: out = self.relu( out )
+    else        : out = out
+    # if self.InShape is None:
+    #   self.InShape  = (inputs.size(-2), inputs.size(-1))
+    #   self.OutShape = (out.size(-2)   , out.size(-1))
+    #   self.BN.normalized_shape = tuple([self.nOut,self.OutShape[0],self.OutShape[1]])
     return out
 
 
@@ -146,13 +185,13 @@ class ResNetBasicblock(nn.Module):
     else: raise ValueError('invalid search_mode = {:}'.format(self.search_mode))
 
   def search_forward(self, tuple_inputs):
-    assert isinstance(tuple_inputs, tuple) and len(tuple_inputs) == 5, 'invalid type input : {:}'.format( type(tuple_inputs) )
-    inputs, expected_inC, probability, indexes, probs = tuple_inputs
-    assert indexes.size(0) == 2 and probs.size(0) == 2 and probability.size(0) == 2
-    out_a, expected_inC_a, expected_flop_a = self.conv_a( (inputs, expected_inC  , probability[0], indexes[0], probs[0]) )
-    out_b, expected_inC_b, expected_flop_b = self.conv_b( (out_a , expected_inC_a, probability[1], indexes[1], probs[1]) )
+    assert isinstance(tuple_inputs, tuple) and len(tuple_inputs) == 3, 'invalid type input : {:}'.format( type(tuple_inputs) )
+    inputs, expected_inC, tau = tuple_inputs
+    # assert indexes.size(0) == 2 and probs.size(0) == 2 and probability.size(0) == 2
+    out_a, expected_inC_a, expected_flop_a = self.conv_a( (inputs, expected_inC, tau) )
+    out_b, expected_inC_b, expected_flop_b = self.conv_b( (out_a , expected_inC_a, tau) )
     if self.downsample is not None:
-      residual, _, expected_flop_c = self.downsample( (inputs, expected_inC  , probability[1], indexes[1], probs[1]) )
+      residual, _, expected_flop_c = self.downsample( (inputs, expected_inC, tau) )
     else:
       residual, expected_flop_c = inputs, 0
     out = additive_func(residual, out_b)
@@ -165,6 +204,7 @@ class ResNetBasicblock(nn.Module):
     if self.downsample is not None: residual = self.downsample(inputs)
     else                          : residual = inputs
     out = additive_func(residual, basicblock)
+    # return out
     return nn.functional.relu(out, inplace=True)
 
 
@@ -229,6 +269,7 @@ class ResNetBottleneck(nn.Module):
     else:
       residual, expected_flop_c = inputs, 0
     out = additive_func(residual, out_1x4)
+    out = nn.functional.relu(out,inplace=True)
     return out, expected_inC_1x4, sum([expected_flop_1x1, expected_flop_3x3, expected_flop_1x4, expected_flop_c])
 
 
@@ -272,7 +313,7 @@ class SearchWidthCifarResNet(nn.Module):
     self.search_mode = 'basic'
     #assert sum(x.num_conv for x in self.layers) + 1 == depth, 'invalid depth check {:} vs {:}'.format(sum(x.num_conv for x in self.layers)+1, depth)
     
-    # parameters for width
+    # parameters for width/chanel
     self.Ranges = []
     self.layer2indexRange = []
     for i, layer in enumerate(self.layers):
@@ -281,12 +322,10 @@ class SearchWidthCifarResNet(nn.Module):
       self.layer2indexRange.append( (start_index, len(self.Ranges)) )
     assert len(self.Ranges) + 1 == depth, 'invalid depth check {:} vs {:}'.format(len(self.Ranges) + 1, depth)
 
-    self.register_parameter('width_attentions', nn.Parameter(torch.Tensor(len(self.Ranges), get_choices(None))))
-    nn.init.normal_(self.width_attentions, 0, 0.01)
     self.apply(initialize_resnet)
 
-  def arch_parameters(self):
-    return [self.width_attentions]
+ 
+    
 
   def base_parameters(self):
     return list(self.layers.parameters()) + list(self.avgpool.parameters()) + list(self.classifier.parameters())
@@ -295,26 +334,18 @@ class SearchWidthCifarResNet(nn.Module):
     if config_dict is not None: config_dict = config_dict.copy()
     #weights = [F.softmax(x, dim=0) for x in self.width_attentions]
     channels = [3]
-    for i, weight in enumerate(self.width_attentions):
-      if mode == 'genotype':
-        with torch.no_grad():
-          probe = nn.functional.softmax(weight, dim=0)
-          C = self.Ranges[i][ torch.argmax(probe).item() ]
-      elif mode == 'max':
-        C = self.Ranges[i][-1]
-      elif mode == 'fix':
-        C = int( math.sqrt( extra_info ) * self.Ranges[i][-1] )
-      elif mode == 'random':
-        assert isinstance(extra_info, float), 'invalid extra_info : {:}'.format(extra_info)
-        with torch.no_grad():
-          prob = nn.functional.softmax(weight, dim=0)
-          approximate_C = int( math.sqrt( extra_info ) * self.Ranges[i][-1] )
-          for j in range(prob.size(0)):
-            prob[j] = 1 / (abs(j - (approximate_C-self.Ranges[i][j])) + 0.2)
-          C = self.Ranges[i][ torch.multinomial(prob, 1, False).item() ]
-      else:
-        raise ValueError('invalid mode : {:}'.format(mode))
-      channels.append( C )
+    for i, block in enumerate(self.layers):
+          if isinstance(block, ConvBNReLU):
+            temp = block.layer_channel_attentions
+            channels.append((temp[:,0]<temp[:,1]).sum().item()+block.min_channel)
+          elif isinstance(block, ResNetBasicblock):
+            conv_a = block.conv_a.layer_channel_attentions
+            conv_b = block.conv_b.layer_channel_attentions
+            channels.append((conv_a[:,0]<conv_a[:,1]).sum().item()+block.conv_a.min_channel)
+            channels.append((conv_b[:,0]<conv_b[:,1]).sum().item()+block.conv_b.min_channel)
+
+          
+    
     flop = 0
     for i, layer in enumerate(self.layers):
       s, e = self.layer2indexRange[i]
@@ -327,26 +358,31 @@ class SearchWidthCifarResNet(nn.Module):
     else:
       config_dict['xchannels']  = channels
       config_dict['super_type'] = 'infer-width'
-      config_dict['estimated_FLOP'] = flop / 1e6
+      config_dict['estimated_FLOP'] = flop/ 1e6
       return flop / 1e6, config_dict
 
   def get_arch_info(self):
-    string = "for width, there are {:} attention probabilities.".format(len(self.width_attentions))
-    discrepancy = []
-    with torch.no_grad():
-      for i, att in enumerate(self.width_attentions):
-        prob = nn.functional.softmax(att, dim=0)
-        prob = prob.cpu() ; selc = prob.argmax().item() ; prob = prob.tolist()
-        prob = ['{:.3f}'.format(x) for x in prob]
-        xstring = '{:03d}/{:03d}-th : {:}'.format(i, len(self.width_attentions), ' '.join(prob))
-        logt = ['{:.3f}'.format(x) for x in att.cpu().tolist()]
-        xstring += '  ||  {:52s}'.format(' '.join(logt))
-        prob = sorted( [float(x) for x in prob] )
-        disc = prob[-1] - prob[-2]
-        xstring += '  || dis={:.2f} || select={:}/{:}'.format(disc, selc, len(prob))
-        discrepancy.append( disc )
-        string += '\n{:}'.format(xstring)
-    return string, discrepancy
+
+
+
+    def com(block):
+      probs   = F.softmax(block.layer_channel_attentions, dim=1)
+      index   = probs.max(-1, keepdim=True)[1]
+      one_h   = torch.zeros_like(block.layer_channel_attentions).scatter_(-1, index, 1.0)
+      return block.min_channel + (one_h[:,1]).sum()
+    channels_ori, channels_after_prune = [3], [3]
+    for i, block in enumerate(self.layers):
+          if isinstance(block, ConvBNReLU):
+            channels_after_prune.append(com(block).item())
+            channels_ori.append(block.nOut)
+          elif isinstance(block, ResNetBasicblock):
+            channels_after_prune.append(com(block.conv_a).item())
+            channels_after_prune.append(com(block.conv_b).item())
+
+            channels_ori.append(block.conv_a.nOut)
+            channels_ori.append(block.conv_b.nOut)
+        
+    return channels_ori, channels_after_prune
 
   def set_tau(self, tau_max, tau_min, epoch_ratio):
     assert epoch_ratio >= 0 and epoch_ratio <= 1, 'invalid epoch-ratio : {:}'.format(epoch_ratio)
@@ -360,22 +396,17 @@ class SearchWidthCifarResNet(nn.Module):
     if self.search_mode == 'basic':
       return self.basic_forward(inputs)
     elif self.search_mode == 'search':
-      return self.search_forward(inputs)
+      return self.search_forward(inputs, self.tau)
     else:
       raise ValueError('invalid search_mode = {:}'.format(self.search_mode))
 
-  def search_forward(self, inputs):
-    flop_probs = nn.functional.softmax(self.width_attentions, dim=1)
-    selected_widths, selected_probs = select2withP(self.width_attentions, self.tau)
-    with torch.no_grad():
-      selected_widths = selected_widths.cpu()
-
-    x, last_channel_idx, expected_inC, flops = inputs, 0, 3, []
+  def search_forward(self, inputs, tau):
+    x = inputs
+    last_channel_idx = 0
+    expected_inC = 3
+    flops = []
     for i, layer in enumerate(self.layers):
-      selected_w_index = selected_widths[last_channel_idx: last_channel_idx+layer.num_conv]
-      selected_w_probs = selected_probs[last_channel_idx: last_channel_idx+layer.num_conv]
-      layer_prob       = flop_probs[last_channel_idx: last_channel_idx+layer.num_conv]
-      x, expected_inC, expected_flop = layer( (x, expected_inC, layer_prob, selected_w_index, selected_w_probs) )
+      x, expected_inC, expected_flop = layer( (x, expected_inC, tau) )
       last_channel_idx += layer.num_conv
       flops.append( expected_flop )
     flops.append( expected_inC * (self.classifier.out_features*1.0/1e6) )
@@ -391,5 +422,6 @@ class SearchWidthCifarResNet(nn.Module):
       x = layer( x )
     features = self.avgpool(x)
     features = features.view(features.size(0), -1)
-    logits   = self.classifier(features)
+    # logits   = self.classifier(features)
+    logits   = linear_forward(features, self.classifier)
     return features, logits

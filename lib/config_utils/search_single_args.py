@@ -23,9 +23,9 @@ def obtain_search_single_args():
 
   if args.rand_seed is None or args.rand_seed < 0:
     args.rand_seed = random.randint(1, 100000)
-  assert args.save_dir is not None, 'save-path argument can not be None'
-  assert args.gumbel_tau_max is not None and args.gumbel_tau_min is not None
-  assert args.FLOP_tolerant is not None and args.FLOP_tolerant > 0, 'invalid FLOP_tolerant : {:}'.format(FLOP_tolerant)
+  # assert args.save_dir is not None, 'save-path argument can not be None'
+  # assert args.gumbel_tau_max is not None and args.gumbel_tau_min is not None
+  # assert args.FLOP_tolerant is not None and args.FLOP_tolerant > 0, 'invalid FLOP_tolerant : {:}'.format(FLOP_tolerant)
   #assert args.arch_para_pure is not None, 'arch_para_pure is not None: {:}'.format(args.arch_para_pure)
   #args.arch_para_pure = bool(args.arch_para_pure)
   return args
